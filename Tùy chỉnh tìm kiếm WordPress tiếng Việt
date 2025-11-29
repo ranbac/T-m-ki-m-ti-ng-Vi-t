@@ -1,0 +1,60 @@
+/*
+ * Tùy chỉnh tìm kiếm V5: 
+ * 1. Tìm trong cả TIÊU ĐỀ và NỘI DUNG.
+ * 2. Logic AND (bắt buộc chứa đủ các từ khóa).
+ * 3. Phân biệt chính xác DẤU (Binary).
+ * 4. TÌM NGUYÊN TỪ (Whole Word) - Loại bỏ kết quả ghép chữ.
+ */
+function search_filter_whole_word_full( $search, $wp_query ) {
+    global $wpdb;
+
+    // Chỉ chạy ở frontend và trong trang tìm kiếm chính
+    if ( is_admin() || ! $wp_query->is_search() || ! $wp_query->is_main_query() ) {
+        return $search;
+    }
+
+    $q = $wp_query->query_vars;
+    $search = '';
+    $searchand = '';
+    $terms = array();
+
+    if(isset($q['s'])) {
+        $terms = explode( ' ', $q['s'] );
+    }
+
+    if ( count( $terms ) > 0 ) {
+        foreach ( $terms as $term ) {
+            if(trim($term) === '') continue; 
+
+            // 1. Chuyển từ khóa về chữ thường
+            $term_lower = mb_strtolower($term, 'UTF-8');
+            
+            // 2. Escape các ký tự đặc biệt của Regex
+            $term_safe = preg_quote($term_lower, '/');
+
+            /* 3. Xây dựng Pattern Regex (Nguyên từ):
+             * Chữ phải nằm giữa: (Đầu dòng/Cách/Dấu câu) ... (Cuối dòng/Cách/Dấu câu)
+             */
+            $regex = "(^|[[:space:]]|[[:punct:]]){$term_safe}($|[[:space:]]|[[:punct:]])";
+
+            // 4. SQL: Kiểm tra cả Title (Tiêu đề) VÀ Content (Nội dung)
+            $search .= "{$searchand} (
+                (LOWER($wpdb->posts.post_title) REGEXP BINARY '{$regex}')
+                OR
+                (LOWER($wpdb->posts.post_content) REGEXP BINARY '{$regex}')
+            )";
+            
+            $searchand = ' AND ';
+        }
+    }
+
+    if ( ! empty( $search ) ) {
+        $search = " AND ({$search}) ";
+        if ( ! is_user_logged_in() )
+            $search .= " AND ($wpdb->posts.post_password = '') ";
+    }
+
+    return $search;
+}
+
+add_filter( 'posts_search', 'search_filter_whole_word_full', 500, 2 );
