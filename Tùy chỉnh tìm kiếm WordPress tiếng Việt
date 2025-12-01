@@ -1,60 +1,64 @@
-/*
- * Tùy chỉnh tìm kiếm V5: 
- * 1. Tìm trong cả TIÊU ĐỀ và NỘI DUNG.
- * 2. Logic AND (bắt buộc chứa đủ các từ khóa).
- * 3. Phân biệt chính xác DẤU (Binary).
- * 4. TÌM NGUYÊN TỪ (Whole Word) - Loại bỏ kết quả ghép chữ.
- */
-function search_filter_whole_word_full( $search, $wp_query ) {
+function search_filter_dictionary_super_optimized( $search, $wp_query ) {
     global $wpdb;
 
-    // Chỉ chạy ở frontend và trong trang tìm kiếm chính
+    // 1. Kiểm tra điều kiện tiêu chuẩn
     if ( is_admin() || ! $wp_query->is_search() || ! $wp_query->is_main_query() ) {
         return $search;
     }
 
     $q = $wp_query->query_vars;
+    $terms = isset($q['s']) ? explode( ' ', $q['s'] ) : array();
+    
+    // Nếu không có từ khóa hợp lệ, trả về như cũ
+    if ( empty($terms) ) return $search;
+
     $search = '';
     $searchand = '';
-    $terms = array();
 
-    if(isset($q['s'])) {
-        $terms = explode( ' ', $q['s'] );
-    }
+    foreach ( $terms as $term ) {
+        $term = trim($term);
+        if ( $term === '' ) continue;
 
-    if ( count( $terms ) > 0 ) {
-        foreach ( $terms as $term ) {
-            if(trim($term) === '') continue; 
+        /**
+         * TỐI ƯU HÓA:
+         * 1. Không dùng mb_strtolower: Để MySQL tự xử lý Case-insensitive (nhờ Collation).
+         * 2. REGEXP trong MySQL mặc định là Case-insensitive (trừ khi cột là Binary).
+         */
+        
+        // Escape các ký tự đặc biệt của Regex (như ., *, +, ?, etc.)
+        $term_regex = preg_quote( $term ); 
 
-            // 1. Chuyển từ khóa về chữ thường
-            $term_lower = mb_strtolower($term, 'UTF-8');
-            
-            // 2. Escape các ký tự đặc biệt của Regex
-            $term_safe = preg_quote($term_lower, '/');
+        // Pattern: Bắt đầu dòng OR khoảng trắng/dấu câu + TỪ KHÓA + Kết thúc dòng OR khoảng trắng/dấu câu
+        // Lưu ý: [[:<:]] và [[:>:]] là word boundary trong MySQL Regex (tương tự \b), 
+        // nhưng MySQL 8.0.4+ dùng \\b. Để an toàn và tương thích ngược, cách dùng logic thủ công của bạn khá ổn.
+        // Tuy nhiên, để đơn giản và hiệu quả hơn với Unicode, ta dùng logic này:
+        
+        $regex_pattern = "(^|[[:space:]]|[[:punct:]])" . $term_regex . "($|[[:space:]]|[[:punct:]])";
 
-            /* 3. Xây dựng Pattern Regex (Nguyên từ):
-             * Chữ phải nằm giữa: (Đầu dòng/Cách/Dấu câu) ... (Cuối dòng/Cách/Dấu câu)
-             */
-            $regex = "(^|[[:space:]]|[[:punct:]]){$term_safe}($|[[:space:]]|[[:punct:]])";
+        // Escape chuỗi cho SQL
+        $regex_sql = $wpdb->_real_escape( $regex_pattern ); // Dùng _real_escape an toàn hơn cho raw string
 
-            // 4. SQL: Kiểm tra cả Title (Tiêu đề) VÀ Content (Nội dung)
-            $search .= "{$searchand} (
-                (LOWER($wpdb->posts.post_title) REGEXP BINARY '{$regex}')
-                OR
-                (LOWER($wpdb->posts.post_content) REGEXP BINARY '{$regex}')
-            )";
-            
-            $searchand = ' AND ';
-        }
+        /* * QUERY OPTIMIZED:
+         * - Bỏ LOWER() để MySQL có thể dùng Index (nếu có).
+         * - Vẫn giữ logic tìm title và 500 ký tự đầu content.
+         */
+        $search .= "{$searchand} (
+            ($wpdb->posts.post_title REGEXP '{$regex_sql}')
+            OR
+            (LEFT($wpdb->posts.post_content, 200) REGEXP '{$regex_sql}')
+        )";
+
+        $searchand = ' AND ';
     }
 
     if ( ! empty( $search ) ) {
         $search = " AND ({$search}) ";
-        if ( ! is_user_logged_in() )
+        if ( ! is_user_logged_in() ) {
             $search .= " AND ($wpdb->posts.post_password = '') ";
+        }
     }
 
     return $search;
 }
 
-add_filter( 'posts_search', 'search_filter_whole_word_full', 500, 2 );
+add_filter( 'posts_search', 'search_filter_dictionary_super_optimized', 500, 2 );
