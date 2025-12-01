@@ -45,7 +45,7 @@ function search_filter_dictionary_super_optimized( $search, $wp_query ) {
         $search .= "{$searchand} (
             ($wpdb->posts.post_title REGEXP '{$regex_sql}')
             OR
-            (LEFT($wpdb->posts.post_content, 200) REGEXP '{$regex_sql}')
+            (LEFT($wpdb->posts.post_content, 500) REGEXP '{$regex_sql}')
         )";
 
         $searchand = ' AND ';
