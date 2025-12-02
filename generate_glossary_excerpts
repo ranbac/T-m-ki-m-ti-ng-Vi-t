@@ -1,0 +1,60 @@
+function bulk_generate_glossary_excerpts() {
+    // Kích hoạt bằng URL: yoursite.com/wp-admin/?run_glossary_fix=1
+    if ( ! isset( $_GET['run_glossary_fix'] ) || $_GET['run_glossary_fix'] != '1' ) return;
+    if ( ! current_user_can( 'manage_options' ) ) wp_die( 'Quyền truy cập bị từ chối.' );
+
+    $batch_size = 50; 
+    $paged      = isset( $_GET['paged'] ) ? intval( $_GET['paged'] ) : 1;
+
+    // QUAN TRỌNG: Sửa post_type thành 'glossary'
+    $args = array(
+        'post_type'      => 'glossary', 
+        'post_status'    => 'publish',
+        'posts_per_page' => $batch_size,
+        'paged'          => $paged,
+        'fields'         => 'ids', 
+        'no_found_rows'  => true,
+    );
+
+    $query = new WP_Query( $args );
+    $posts = $query->posts;
+
+    if ( empty( $posts ) ) {
+        wp_die( "<h1>XONG! Đã xử lý hết dữ liệu Glossary.</h1>" );
+    }
+
+    $count_updated = 0;
+    foreach ( $posts as $post_id ) {
+        $content_post = get_post( $post_id );
+        $content      = $content_post->post_content;
+        
+        // Logic trích xuất
+        $lines = preg_split( '/\r\n|\r|\n/', $content );
+        $extracted_data = array();
+        foreach ( $lines as $line ) {
+            $clean_line = wp_strip_all_tags( $line );
+            if ( strpos( $clean_line, '|' ) !== false ) {
+                $extracted_data[] = trim( $clean_line );
+            }
+        }
+
+        if ( ! empty( $extracted_data ) ) {
+            wp_update_post( array(
+                'ID'           => $post_id,
+                'post_excerpt' => implode( "\n", $extracted_data )
+            ) );
+            $count_updated++;
+        }
+    }
+
+    // Tự động chuyển trang
+    $next_page = $paged + 1;
+    $current_url = admin_url( "?run_glossary_fix=1&paged={$next_page}" );
+    
+    echo "<div style='font-family: monospace; padding: 20px;'>";
+    echo "<h2>Đang xử lý Glossary... Trang $paged</h2>";
+    echo "<p>Đã cập nhật: $count_updated từ vựng.</p>";
+    echo "<script>setTimeout(function(){ window.location.href = '$current_url'; }, 1000);</script>";
+    exit;
+}
+add_action( 'admin_init', 'bulk_generate_glossary_excerpts' );
