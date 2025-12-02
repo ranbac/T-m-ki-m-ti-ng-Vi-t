@@ -1,12 +1,17 @@
 /**
- * PHẦN 1: BỘ LỌC TÌM KIẾM (SEARCH FILTER) - LOGIC THÔNG MINH
- * - Tiếng Trung: Tìm tương đối (LIKE) để ra được các từ ghép (Học -> Học sinh).
- * - Tiếng Việt/Anh: Tìm chính xác (REGEXP) để tránh nhầm dấu (Bố != Bộ).
+ * ============================================================================
+ * FULL CODE: SEARCH & SMART SORT FOR GLOSSARY (FINAL v3)
+ * Logic: Tối ưu tìm kiếm và Sắp xếp thông minh theo cấu trúc dữ liệu
+ * ============================================================================
+ */
+
+/**
+ * PHẦN 1: BỘ LỌC TÌM KIẾM (SEARCH WHERE)
+ * Giữ nguyên logic: Tiếng Trung (LIKE), Tiếng Việt/Anh (REGEXP)
  */
 function search_filter_glossary_final( $search, $wp_query ) {
     global $wpdb;
 
-    // Chỉ chạy ở Frontend, trang tìm kiếm và là Query chính
     if ( is_admin() || ! $wp_query->is_search() || ! $wp_query->is_main_query() ) {
         return $search;
     }
@@ -23,25 +28,16 @@ function search_filter_glossary_final( $search, $wp_query ) {
         $term = trim($term);
         if ( $term === '' ) continue;
 
-        // KIỂM TRA: Từ khóa có chứa ký tự tiếng Trung hay không?
-        // \p{Han} là mã Unicode đại diện cho Hán tự
         $is_chinese = preg_match( '/\p{Han}/u', $term );
 
         if ( $is_chinese ) {
-            // --- LOGIC CHO TIẾNG TRUNG (Dùng LIKE) ---
-            // Cho phép tìm "学" ra "学校", "学生"...
             $like = '%' . $wpdb->esc_like( $term ) . '%';
-            
             $search .= "{$searchand} (
                 ($wpdb->posts.post_title LIKE '{$like}')
                 OR
                 ($wpdb->posts.post_excerpt LIKE '{$like}')
             )";
-
         } else {
-            // --- LOGIC CHO TIẾNG VIỆT / ANH (Dùng REGEXP) ---
-            // Bắt buộc có ranh giới từ (khoảng trắng, đầu dòng, dấu câu)
-            // Tìm "bố" KHÔNG ra "bộ", "tuyên bố"
             $term_regex = preg_quote( $term );
             $regex_pattern = "(^|[[:space:]]|[[:punct:]])" . $term_regex . "($|[[:space:]]|[[:punct:]])";
             $regex_sql = esc_sql( $regex_pattern );
@@ -52,7 +48,6 @@ function search_filter_glossary_final( $search, $wp_query ) {
                 ($wpdb->posts.post_excerpt REGEXP '{$regex_sql}')
             )";
         }
-
         $searchand = ' AND ';
     }
 
@@ -69,10 +64,9 @@ add_filter( 'posts_search', 'search_filter_glossary_final', 500, 2 );
 
 
 /**
- * PHẦN 2: BỘ LỌC SẮP XẾP (ORDER FILTER) - KHÔNG ĐỔI
- * Ưu tiên: Glossary > Khớp chính xác > Bắt đầu bằng từ khóa > Tiêu đề ngắn
+ * PHẦN 2: BỘ LỌC SẮP XẾP (ORDER BY) - 4 CẤP ĐỘ (Đã cập nhật Level 2)
  */
-function prioritize_glossary_exact_match( $orderby, $query ) {
+function prioritize_glossary_smart_excerpt( $orderby, $query ) {
     global $wpdb;
 
     if ( is_admin() || ! $query->is_search() || ! $query->is_main_query() ) {
@@ -84,25 +78,56 @@ function prioritize_glossary_exact_match( $orderby, $query ) {
         return $orderby;
     }
 
-    $esc_term = esc_sql( trim( $search_term ) );
+    $term = trim( $search_term );
+    $esc_term = esc_sql( $term );
 
-    // 1. Ưu tiên Glossary
+    // Regex cho Mức độ ưu tiên 4 (Ngữ cảnh)
+    $term_regex = preg_quote( $term );
+    $regex_pattern = "(^|[[:space:]]|[[:punct:]])" . $term_regex . "($|[[:space:]]|[[:punct:]])";
+    $regex_sql = esc_sql( $regex_pattern );
+
+    // --- CẤU TRÚC SẮP XẾP ---
+
+    // 1. Ưu tiên Post Type
     $order_type = "CASE WHEN $wpdb->posts.post_type = 'glossary' THEN 1 ELSE 2 END";
 
-    // 2. Ưu tiên độ khớp tiêu đề
-    // - Khớp 100% -> 1
-    // - Bắt đầu bằng từ khóa -> 2
-    // - Chứa từ khóa -> 3
-    $order_relevance = "CASE 
+    // 2. Ưu tiên khớp Tiêu đề
+    $order_title = "CASE 
         WHEN $wpdb->posts.post_title = '$esc_term' THEN 1 
         WHEN $wpdb->posts.post_title LIKE '$esc_term%' THEN 2 
         ELSE 3 
     END";
 
-    // 3. Ưu tiên tiêu đề ngắn
+    // 3. Ưu tiên khớp Nghĩa trong Excerpt
+    $order_excerpt = "CASE
+        -- LEVEL 1: Nghĩa duy nhất (Kết thúc dòng sau dấu |)
+        -- VD: '... | neck | cổ'
+        WHEN $wpdb->posts.post_excerpt LIKE '%| $esc_term' THEN 1
+        
+        -- LEVEL 2: Nghĩa chính (Đứng đầu HOẶC Đứng cuối trong danh sách nghĩa)
+        -- Trường hợp 1: Đứng đầu (VD: '... | ancient | cổ, xưa')
+        WHEN $wpdb->posts.post_excerpt LIKE '%| $esc_term,%' THEN 2
+        WHEN $wpdb->posts.post_excerpt LIKE '%| $esc_term;%' THEN 2
+        
+        -- Trường hợp 2: Đứng cuối sau dấu phân cách (VD: '... | throat; neck | họng; cổ')
+        -- Yêu cầu của bạn: LIKE '%| ,%;cổ' tính ngang hàng
+        WHEN $wpdb->posts.post_excerpt LIKE '%; $esc_term' THEN 2
+        WHEN $wpdb->posts.post_excerpt LIKE '%, $esc_term' THEN 2
+        
+        -- LEVEL 3: Từ ghép (VD: '... | ancient times | cổ đại')
+        -- Logic: Chứa '| ...cổ...' nhưng không khớp Lv1, Lv2
+        WHEN $wpdb->posts.post_excerpt LIKE '%| $esc_term%' THEN 3
+        
+        -- LEVEL 4: Ngữ cảnh/Ví dụ (VD: '... bóp (cổ)...')
+        WHEN $wpdb->posts.post_excerpt REGEXP '$regex_sql' THEN 4
+        
+        ELSE 5
+    END";
+
+    // 4. Ưu tiên tiêu đề ngắn
     $order_length = "CHAR_LENGTH($wpdb->posts.post_title)";
 
-    $custom_order = "$order_type ASC, $order_relevance ASC, $order_length ASC";
+    $custom_order = "$order_type ASC, $order_title ASC, $order_excerpt ASC, $order_length ASC";
 
     if ( empty( $orderby ) ) {
         return $custom_order;
@@ -110,4 +135,6 @@ function prioritize_glossary_exact_match( $orderby, $query ) {
         return $custom_order . ', ' . $orderby;
     }
 }
-add_filter( 'posts_orderby', 'prioritize_glossary_exact_match', 10, 2 );
+// Xóa hook cũ và add hook mới
+remove_filter( 'posts_orderby', 'prioritize_glossary_exact_match', 10 ); 
+add_filter( 'posts_orderby', 'prioritize_glossary_smart_excerpt', 10, 2 );
