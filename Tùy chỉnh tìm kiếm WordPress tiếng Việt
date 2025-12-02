@@ -1,15 +1,19 @@
-function search_filter_dictionary_super_optimized( $search, $wp_query ) {
+/**
+ * PHẦN 1: BỘ LỌC TÌM KIẾM (SEARCH FILTER) - LOGIC THÔNG MINH
+ * - Tiếng Trung: Tìm tương đối (LIKE) để ra được các từ ghép (Học -> Học sinh).
+ * - Tiếng Việt/Anh: Tìm chính xác (REGEXP) để tránh nhầm dấu (Bố != Bộ).
+ */
+function search_filter_glossary_final( $search, $wp_query ) {
     global $wpdb;
 
-    // 1. Kiểm tra điều kiện tiêu chuẩn
+    // Chỉ chạy ở Frontend, trang tìm kiếm và là Query chính
     if ( is_admin() || ! $wp_query->is_search() || ! $wp_query->is_main_query() ) {
         return $search;
     }
 
     $q = $wp_query->query_vars;
-    $terms = isset($q['s']) ? explode( ' ', $q['s'] ) : array();
-    
-    // Nếu không có từ khóa hợp lệ, trả về như cũ
+    $terms = isset($q['s']) ? preg_split( '/\s+/', trim( $q['s'] ) ) : array();
+
     if ( empty($terms) ) return $search;
 
     $search = '';
@@ -19,34 +23,35 @@ function search_filter_dictionary_super_optimized( $search, $wp_query ) {
         $term = trim($term);
         if ( $term === '' ) continue;
 
-        /**
-         * TỐI ƯU HÓA:
-         * 1. Không dùng mb_strtolower: Để MySQL tự xử lý Case-insensitive (nhờ Collation).
-         * 2. REGEXP trong MySQL mặc định là Case-insensitive (trừ khi cột là Binary).
-         */
-        
-        // Escape các ký tự đặc biệt của Regex (như ., *, +, ?, etc.)
-        $term_regex = preg_quote( $term ); 
+        // KIỂM TRA: Từ khóa có chứa ký tự tiếng Trung hay không?
+        // \p{Han} là mã Unicode đại diện cho Hán tự
+        $is_chinese = preg_match( '/\p{Han}/u', $term );
 
-        // Pattern: Bắt đầu dòng OR khoảng trắng/dấu câu + TỪ KHÓA + Kết thúc dòng OR khoảng trắng/dấu câu
-        // Lưu ý: [[:<:]] và [[:>:]] là word boundary trong MySQL Regex (tương tự \b), 
-        // nhưng MySQL 8.0.4+ dùng \\b. Để an toàn và tương thích ngược, cách dùng logic thủ công của bạn khá ổn.
-        // Tuy nhiên, để đơn giản và hiệu quả hơn với Unicode, ta dùng logic này:
-        
-        $regex_pattern = "(^|[[:space:]]|[[:punct:]])" . $term_regex . "($|[[:space:]]|[[:punct:]])";
+        if ( $is_chinese ) {
+            // --- LOGIC CHO TIẾNG TRUNG (Dùng LIKE) ---
+            // Cho phép tìm "学" ra "学校", "学生"...
+            $like = '%' . $wpdb->esc_like( $term ) . '%';
+            
+            $search .= "{$searchand} (
+                ($wpdb->posts.post_title LIKE '{$like}')
+                OR
+                ($wpdb->posts.post_excerpt LIKE '{$like}')
+            )";
 
-        // Escape chuỗi cho SQL
-        $regex_sql = $wpdb->_real_escape( $regex_pattern ); // Dùng _real_escape an toàn hơn cho raw string
+        } else {
+            // --- LOGIC CHO TIẾNG VIỆT / ANH (Dùng REGEXP) ---
+            // Bắt buộc có ranh giới từ (khoảng trắng, đầu dòng, dấu câu)
+            // Tìm "bố" KHÔNG ra "bộ", "tuyên bố"
+            $term_regex = preg_quote( $term );
+            $regex_pattern = "(^|[[:space:]]|[[:punct:]])" . $term_regex . "($|[[:space:]]|[[:punct:]])";
+            $regex_sql = esc_sql( $regex_pattern );
 
-        /* * QUERY OPTIMIZED:
-         * - Bỏ LOWER() để MySQL có thể dùng Index (nếu có).
-         * - Vẫn giữ logic tìm title và 500 ký tự đầu content.
-         */
-        $search .= "{$searchand} (
-            ($wpdb->posts.post_title REGEXP '{$regex_sql}')
-            OR
-            (LEFT($wpdb->posts.post_content, 500) REGEXP '{$regex_sql}')
-        )";
+            $search .= "{$searchand} (
+                ($wpdb->posts.post_title REGEXP '{$regex_sql}')
+                OR
+                ($wpdb->posts.post_excerpt REGEXP '{$regex_sql}')
+            )";
+        }
 
         $searchand = ' AND ';
     }
@@ -60,5 +65,49 @@ function search_filter_dictionary_super_optimized( $search, $wp_query ) {
 
     return $search;
 }
+add_filter( 'posts_search', 'search_filter_glossary_final', 500, 2 );
 
-add_filter( 'posts_search', 'search_filter_dictionary_super_optimized', 500, 2 );
+
+/**
+ * PHẦN 2: BỘ LỌC SẮP XẾP (ORDER FILTER) - KHÔNG ĐỔI
+ * Ưu tiên: Glossary > Khớp chính xác > Bắt đầu bằng từ khóa > Tiêu đề ngắn
+ */
+function prioritize_glossary_exact_match( $orderby, $query ) {
+    global $wpdb;
+
+    if ( is_admin() || ! $query->is_search() || ! $query->is_main_query() ) {
+        return $orderby;
+    }
+
+    $search_term = $query->get( 's' );
+    if ( ! $search_term ) {
+        return $orderby;
+    }
+
+    $esc_term = esc_sql( trim( $search_term ) );
+
+    // 1. Ưu tiên Glossary
+    $order_type = "CASE WHEN $wpdb->posts.post_type = 'glossary' THEN 1 ELSE 2 END";
+
+    // 2. Ưu tiên độ khớp tiêu đề
+    // - Khớp 100% -> 1
+    // - Bắt đầu bằng từ khóa -> 2
+    // - Chứa từ khóa -> 3
+    $order_relevance = "CASE 
+        WHEN $wpdb->posts.post_title = '$esc_term' THEN 1 
+        WHEN $wpdb->posts.post_title LIKE '$esc_term%' THEN 2 
+        ELSE 3 
+    END";
+
+    // 3. Ưu tiên tiêu đề ngắn
+    $order_length = "CHAR_LENGTH($wpdb->posts.post_title)";
+
+    $custom_order = "$order_type ASC, $order_relevance ASC, $order_length ASC";
+
+    if ( empty( $orderby ) ) {
+        return $custom_order;
+    } else {
+        return $custom_order . ', ' . $orderby;
+    }
+}
+add_filter( 'posts_orderby', 'prioritize_glossary_exact_match', 10, 2 );
