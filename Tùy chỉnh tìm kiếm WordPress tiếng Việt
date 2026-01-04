@@ -1,17 +1,22 @@
+<?php
 /**
  * ============================================================================
- * FULL CODE: GLOSSARY SEARCH & SORT (v5 - SEPARABLE VERBS SUPPORT)
+ * FULL CODE: GLOSSARY SEARCH & SORT (v6 - ULTIMATE FLEXIBLE PINYIN)
  * Tính năng:
  * 1. Tìm Tiếng Trung (LIKE), Tiếng Việt/Anh (REGEXP).
  * 2. Tìm Pinyin không dấu (nhập 'gu' -> 'gǔ').
- * 3. Hỗ trợ Ly hợp từ có ký tự '∥' (nhập 'chifan' -> tìm thấy 'chī∥fàn', 'zuò∥fàn').
+ * 3. Hỗ trợ mọi ký tự ngăn cách Pinyin:
+ * - Dấu chấm: cōng·míng (nhập 'congming' tìm thấy)
+ * - Ly hợp từ: chī∥fàn (nhập 'chifan' tìm thấy)
+ * - Gạch đứng: bàba∣bà (nhập 'bababa' tìm thấy)
+ * - Gạch ngang: mǎ-lù (nhập 'malu' tìm thấy)
  * 4. Sắp xếp thông minh 4 cấp độ.
  * ============================================================================
  */
 
-// --- HÀM PHỤ TRỢ: TẠO REGEX PINYIN LINH HOẠT ---
-if ( ! function_exists( 'glossary_build_flexible_pinyin_regex' ) ) {
-    function glossary_build_flexible_pinyin_regex( $term ) {
+// --- HÀM PHỤ TRỢ: TẠO REGEX PINYIN SIÊU LINH HOẠT ---
+if ( ! function_exists( 'glossary_build_flexible_pinyin_regex_v6' ) ) {
+    function glossary_build_flexible_pinyin_regex_v6( $term ) {
         // 1. Map nguyên âm sang Regex có dấu
         $pinyin_map = array(
             'a' => '[aāáǎà]',
@@ -26,22 +31,30 @@ if ( ! function_exists( 'glossary_build_flexible_pinyin_regex' ) ) {
         $chars = preg_split('//u', $term, -1, PREG_SPLIT_NO_EMPTY);
         $regex_parts = array();
 
-        // 3. Regex cho dấu phân cách: Cho phép dấu '∥' (U+2225) hoặc khoảng trắng
-        // (∥|[[:space:]])? : Có thể có '∥' hoặc cách, hoặc không có gì.
-        $separator = '(∥|[[:space:]])?'; 
+        /**
+         * 3. Regex cho dấu phân cách (SEPARATOR)
+         * Cho phép xuất hiện (hoặc không) các ký tự sau giữa các chữ cái:
+         * [[:space:]] : Khoảng trắng
+         * ∥          : Dấu gạch đôi (U+2225)
+         * ∣          : Dấu gạch đứng mảnh (U+2223) - KHÁC dấu | thẳng (pipe)
+         * ·          : Dấu chấm giữa (U+00B7)
+         * -          : Dấu gạch ngang
+         */
+        $separator = '([[:space:]∥∣·\-]*)?'; 
 
         foreach ( $chars as $char ) {
+            $char_lower = strtolower($char);
             // Nếu ký tự là nguyên âm, thay thế bằng set pinyin
-            if ( isset( $pinyin_map[ strtolower($char) ] ) ) {
-                $regex_parts[] = $pinyin_map[ strtolower($char) ];
+            if ( isset( $pinyin_map[ $char_lower ] ) ) {
+                $regex_parts[] = $pinyin_map[ $char_lower ];
             } else {
-                // Nếu là phụ âm, giữ nguyên (escape để an toàn)
+                // Nếu là phụ âm hoặc ký tự khác, escape để an toàn
                 $regex_parts[] = preg_quote( $char );
             }
         }
 
         // 4. Nối các ký tự lại, chèn separator vào giữa
-        // VD: chifan -> c(..)?h(..)?i(..)?f(..)?a(..)?n
+        // VD: congming -> c(..)?o(..)?n(..)?g(..)?m(..)?i(..)?n(..)?g
         return implode( $separator, $regex_parts );
     }
 }
@@ -49,7 +62,7 @@ if ( ! function_exists( 'glossary_build_flexible_pinyin_regex' ) ) {
 /**
  * PHẦN 1: BỘ LỌC TÌM KIẾM (SEARCH WHERE)
  */
-function glossary_search_filter_v5( $search, $wp_query ) {
+function glossary_search_filter_v6( $search, $wp_query ) {
     global $wpdb;
 
     if ( is_admin() || ! $wp_query->is_search() || ! $wp_query->is_main_query() ) {
@@ -79,15 +92,16 @@ function glossary_search_filter_v5( $search, $wp_query ) {
                 ($wpdb->posts.post_excerpt LIKE '{$like}')
             )";
         } else {
-            // Logic Latin & Pinyin (Separable)
+            // Logic Latin & Pinyin Flexible
             $term_safe = preg_quote( $term );
 
-            // 1. Regex từ gốc (Tìm chính xác từ nhập vào - Tiếng Việt/Anh)
+            // A. Regex từ gốc (Tìm chính xác từ nhập vào - cho Tiếng Việt/Anh)
             $regex_std = "(^|[[:space:]]|[[:punct:]])" . $term_safe . "($|[[:space:]]|[[:punct:]])";
 
-            // 2. Regex Pinyin Linh hoạt (Hỗ trợ ∥)
-            // VD: nhập "chifan" -> chuỗi regex khớp được "chī∥fàn"
-            $pinyin_pattern = glossary_build_flexible_pinyin_regex( $term );
+            // B. Regex Pinyin Linh hoạt (Hỗ trợ · ∥ ∣ -)
+            $pinyin_pattern = glossary_build_flexible_pinyin_regex_v6( $term );
+            
+            // Tìm pattern Pinyin này đứng độc lập (đầu dòng, sau dấu cách, sau dấu câu...)
             $regex_pinyin = "(^|[[:space:]]|[[:punct:]])" . $pinyin_pattern . "($|[[:space:]]|[[:punct:]])";
 
             // Gộp pattern
@@ -112,13 +126,13 @@ function glossary_search_filter_v5( $search, $wp_query ) {
 
     return $search;
 }
-add_filter( 'posts_search', 'glossary_search_filter_v5', 500, 2 );
+add_filter( 'posts_search', 'glossary_search_filter_v6', 500, 2 );
 
 
 /**
  * PHẦN 2: BỘ LỌC SẮP XẾP (ORDER BY)
  */
-function glossary_orderby_filter_v5( $orderby, $query ) {
+function glossary_orderby_filter_v6( $orderby, $query ) {
     global $wpdb;
 
     if ( is_admin() || ! $query->is_search() || ! $query->is_main_query() ) {
@@ -139,11 +153,10 @@ function glossary_orderby_filter_v5( $orderby, $query ) {
     $sql_regex_context = esc_sql( $regex_context_raw );
 
     // 2. Regex Pinyin Linh hoạt (Dùng cho Level 2)
-    // Tạo pattern hỗ trợ '∥': chifan -> c(..)?h(..)?...
-    $pinyin_pattern = glossary_build_flexible_pinyin_regex( $term );
+    $pinyin_pattern = glossary_build_flexible_pinyin_regex_v6( $term );
     
-    // Pattern Strict: Tìm Pinyin nằm ngay sau dấu '|'
-    // VD: khớp "...| chī∥fàn |..." hoặc "...| gǔ |..."
+    // Pattern Strict: Tìm Pinyin nằm ngay sau dấu '|' (Field Pinyin)
+    // Nó sẽ khớp: "| chī∥fàn |", "| cōng·míng |", "| bàba∣bà |"
     $regex_pinyin_strict = "\|[[:space:]]*" . $pinyin_pattern . "([[:punct:]]|[[:space:]]|$)";
     $sql_regex_pinyin = esc_sql( $regex_pinyin_strict );
 
@@ -162,13 +175,14 @@ function glossary_orderby_filter_v5( $orderby, $query ) {
 
     // 3. Ưu tiên nội dung Excerpt
     $order_excerpt = "CASE
-        -- LEVEL 1: Nghĩa duy nhất chính xác
+        -- LEVEL 1: Nghĩa duy nhất chính xác (Text thường)
         WHEN $wpdb->posts.post_excerpt LIKE '%| $esc_term' THEN 1
         
-        -- LEVEL 2: Nghĩa chính HOẶC Pinyin chính (Bao gồm cả Ly hợp từ '∥')
-        -- Khớp Pinyin (chifan -> chī∥fàn)
+        -- LEVEL 2: Nghĩa chính HOẶC Pinyin chính (Flexible)
+        -- Ưu tiên cao nhất cho Pinyin khớp đúng cấu trúc (bất kể dấu ngăn cách)
         WHEN $wpdb->posts.post_excerpt REGEXP '$sql_regex_pinyin' THEN 2
-        -- Khớp Nghĩa text đứng đầu/cuối
+        
+        -- Nghĩa Text chính (Đứng đầu hoặc cuối list nghĩa)
         WHEN $wpdb->posts.post_excerpt LIKE '%| $esc_term,%' THEN 2
         WHEN $wpdb->posts.post_excerpt LIKE '%| $esc_term;%' THEN 2
         WHEN $wpdb->posts.post_excerpt LIKE '%; $esc_term' THEN 2
@@ -194,10 +208,14 @@ function glossary_orderby_filter_v5( $orderby, $query ) {
         return $custom_order . ', ' . $orderby;
     }
 }
-// Remove old hooks (v1, v2, v3, v4)
-remove_filter( 'posts_search', 'glossary_search_filter_v4', 500 );
+
+// Remove old hooks (v1 -> v5) - Đảm bảo xóa sạch hook cũ
+remove_filter( 'posts_search', 'glossary_search_filter_v5', 500 );
+remove_filter( 'posts_orderby', 'glossary_orderby_filter_v5', 10 );
+// (Phòng hờ các bản cũ hơn)
+remove_filter( 'posts_search', 'glossary_search_filter_v4', 500 ); 
 remove_filter( 'posts_orderby', 'glossary_orderby_filter_v4', 10 );
 
-// Add new hooks (v5)
-add_filter( 'posts_search', 'glossary_search_filter_v5', 500, 2 );
-add_filter( 'posts_orderby', 'glossary_orderby_filter_v5', 10, 2 );
+// Add new hooks (v6)
+add_filter( 'posts_search', 'glossary_search_filter_v6', 500, 2 );
+add_filter( 'posts_orderby', 'glossary_orderby_filter_v6', 10, 2 );
