@@ -1,14 +1,12 @@
 /**
  * ============================================================================
- * FULL CODE: GLOSSARY SEARCH & SORT (v6.3 - SAFE MODE & SYNTAX FIX)
+ * FULL CODE: GLOSSARY SEARCH & SORT (v6.4 - FIX INVISIBLE SPACE ISSUE)
  * ============================================================================
  */
 
 // --- 1. CÁC HÀM HELPER PINYIN ---
-
 if ( ! function_exists( 'glossary_get_pinyin_map' ) ) {
     function glossary_get_pinyin_map() {
-        // Sử dụng array() chuẩn để tránh lỗi phiên bản PHP cũ
         return array(
             'a' => '[aāáǎà]',
             'e' => '[eēéěè]',
@@ -23,12 +21,11 @@ if ( ! function_exists( 'glossary_get_pinyin_map' ) ) {
 if ( ! function_exists( 'glossary_build_flexible_pinyin_regex' ) ) {
     function glossary_build_flexible_pinyin_regex( $term ) {
         $pinyin_map = glossary_get_pinyin_map();
-        // Tách chuỗi UTF-8 an toàn
         $chars = preg_split('//u', $term, -1, PREG_SPLIT_NO_EMPTY);
         $regex_parts = array();
         
-        // Regex cho dấu ngăn cách (dấu cách, chấm, gạch ngang...)
-        $separator = '([[:space:]·∥\.\-]*)'; 
+        // Regex cho dấu ngăn cách: Thêm \p{Z} để bắt mọi loại khoảng trắng lạ
+        $separator = '([[:space:]\p{Z}·∥\.\-]*)'; 
 
         foreach ( $chars as $char ) {
             $lower_char = mb_strtolower($char);
@@ -42,9 +39,8 @@ if ( ! function_exists( 'glossary_build_flexible_pinyin_regex' ) ) {
     }
 }
 
-// --- 2. BỘ LỌC TÌM KIẾM (SEARCH WHERE) ---
-
-function glossary_search_filter_v6_3( $search, $wp_query ) {
+// --- 2. BỘ LỌC TÌM KIẾM ---
+function glossary_search_filter_v6_4( $search, $wp_query ) {
     global $wpdb;
 
     if ( is_admin() || ! $wp_query->is_search() || ! $wp_query->is_main_query() ) {
@@ -52,17 +48,14 @@ function glossary_search_filter_v6_3( $search, $wp_query ) {
     }
 
     $q = $wp_query->query_vars;
-    // Kiểm tra kỹ biến s để tránh lỗi undefined
     $raw_term = trim( isset($q['s']) ? $q['s'] : '' );
     if ( empty($raw_term) ) return $search;
 
-    $terms = preg_split( '/\s+/', $raw_term );
+    // Dùng preg_split với \p{Z} để tách từ chuẩn xác kể cả khi dính dấu cách lạ
+    $terms = preg_split( '/[\s\p{Z}]+/u', $raw_term );
     $term_conditions = array();
-
-    // Lấy tên bảng an toàn
     $table_posts = $wpdb->posts;
 
-    // --- A. TÌM TỪNG TỪ ---
     foreach ( $terms as $term ) {
         $term = trim($term);
         if ( $term === '' ) continue;
@@ -70,49 +63,43 @@ function glossary_search_filter_v6_3( $search, $wp_query ) {
         $is_chinese = preg_match( '/\p{Han}/u', $term );
 
         if ( $is_chinese ) {
-            // Tiếng Trung: Dùng LIKE
             $like = '%' . $wpdb->esc_like( $term ) . '%';
-            // Nối chuỗi an toàn thay vì lồng biến
-            $term_conditions[] = "(
-                ($table_posts.post_title LIKE '$like') OR ($table_posts.post_excerpt LIKE '$like')
-            )";
+            $term_conditions[] = "( ($table_posts.post_title LIKE '$like') OR ($table_posts.post_excerpt LIKE '$like') )";
         } else {
-            // Latin: Dùng REGEXP
             $term_safe = preg_quote( $term );
+            // Cập nhật Regex Boundary để hỗ trợ unicode space
+            $boundary = '(^|[\s\p{Z}]|[[:punct:]])';
             
-            // Regex cơ bản và Pinyin
-            $regex_std = "(^|[[:space:]]|[[:punct:]])" . $term_safe . "($|[[:space:]]|[[:punct:]])";
+            $regex_std = $boundary . $term_safe . $boundary;
             $pinyin_pattern = glossary_build_flexible_pinyin_regex( $term );
-            $regex_pinyin = "(^|[[:space:]]|[[:punct:]])" . $pinyin_pattern . "($|[[:space:]]|[[:punct:]])"; 
+            $regex_pinyin = $boundary . $pinyin_pattern . $boundary; 
 
             $final_regex = $regex_std . '|' . $regex_pinyin;
             $regex_sql = esc_sql( $final_regex );
 
-            $term_conditions[] = "(
-                ($table_posts.post_title REGEXP '$regex_sql') OR ($table_posts.post_excerpt REGEXP '$regex_sql')
-            )";
+            $term_conditions[] = "( ($table_posts.post_title REGEXP '$regex_sql') OR ($table_posts.post_excerpt REGEXP '$regex_sql') )";
         }
     }
 
-    // --- B. TÌM CỤM TỪ (PHRASE) ---
+    // Phrase Support
     $phrase_condition = '';
     $is_full_chinese = preg_match( '/\p{Han}/u', $raw_term );
     
     if ( ! $is_full_chinese && count($terms) > 0 ) {
-        $clean_full_term = str_replace(' ', '', $raw_term);
+        // QUAN TRỌNG: Xóa mọi loại khoảng trắng (bao gồm dấu cách lạ)
+        $clean_full_term = preg_replace('/[\s\p{Z}]+/u', '', $raw_term);
+        
         if ( !empty($clean_full_term) ) {
             $pinyin_full_pattern = glossary_build_flexible_pinyin_regex( $clean_full_term );
+            $boundary = '(^|[\s\p{Z}]|[[:punct:]])';
             
-            $regex_full = "(^|[[:space:]]|[[:punct:]])" . $pinyin_full_pattern . "($|[[:space:]]|[[:punct:]])";
+            $regex_full = $boundary . $pinyin_full_pattern . $boundary;
             $regex_full_sql = esc_sql( $regex_full );
 
-            $phrase_condition = "(
-                ($table_posts.post_title REGEXP '$regex_full_sql') OR ($table_posts.post_excerpt REGEXP '$regex_full_sql')
-            )";
+            $phrase_condition = "( ($table_posts.post_title REGEXP '$regex_full_sql') OR ($table_posts.post_excerpt REGEXP '$regex_full_sql') )";
         }
     }
 
-    // --- C. TỔNG HỢP SQL ---
     if ( empty($term_conditions) ) return $search;
 
     $sql_split_terms = implode( ' AND ', $term_conditions );
@@ -130,12 +117,10 @@ function glossary_search_filter_v6_3( $search, $wp_query ) {
 
     return $search;
 }
-add_filter( 'posts_search', 'glossary_search_filter_v6_3', 500, 2 );
+add_filter( 'posts_search', 'glossary_search_filter_v6_4', 500, 2 );
 
-
-// --- 3. BỘ LỌC SẮP XẾP (ORDER BY) ---
-
-function glossary_orderby_filter_v6_3( $orderby, $query ) {
+// --- 3. BỘ LỌC SẮP XẾP ---
+function glossary_orderby_filter_v6_4( $orderby, $query ) {
     global $wpdb;
 
     if ( is_admin() || ! $query->is_search() || ! $query->is_main_query() ) {
@@ -147,35 +132,31 @@ function glossary_orderby_filter_v6_3( $orderby, $query ) {
 
     $term = trim( $search_term );
     $esc_term = esc_sql( $term );
-    $table_posts = $wpdb->posts; // Đặt biến bảng riêng để tránh lỗi cú pháp
+    $table_posts = $wpdb->posts;
     
-    // --- CHUẨN BỊ REGEX ---
-    $clean_full_term = str_replace(' ', '', $term);
+    // QUAN TRỌNG: Xóa mọi loại khoảng trắng
+    $clean_full_term = preg_replace('/[\s\p{Z}]+/u', '', $term);
     $pinyin_pattern = glossary_build_flexible_pinyin_regex( $clean_full_term );
     
+    // Regex boundary mở rộng (\s hoặc \p{Z})
+    $boundary_rgx = '([[:punct:]]|[\s\p{Z}]|$)';
+
     // Pattern 1: Đầu dòng
-    $regex_start = "^[[:space:]]*" . $pinyin_pattern . "([[:punct:]]|[[:space:]]|$)";
+    $regex_start = "^[\s\p{Z}]*" . $pinyin_pattern . $boundary_rgx;
     $sql_regex_start = esc_sql( $regex_start );
 
     // Pattern 2: Sau dấu |
-    $regex_pipe = "\|[[:space:]]*" . $pinyin_pattern . "([[:punct:]]|[[:space:]]|$)";
+    $regex_pipe = "\|[\s\p{Z}]*" . $pinyin_pattern . $boundary_rgx;
     $sql_regex_pipe = esc_sql( $regex_pipe );
 
-    // --- CẤU TRÚC SQL (DÙNG NỐI CHUỖI ĐỂ AN TOÀN) ---
-    // Lưu ý: Dùng . để nối chuỗi giúp PHP không bị nhầm lẫn ký tự [ trong Regex
-
-    // 1. Post Type
     $order_type = "CASE WHEN $table_posts.post_type = 'glossary' THEN 1 ELSE 2 END";
 
-    // 2. Title
     $order_title = "CASE 
         WHEN $table_posts.post_title = '$esc_term' THEN 1 
         WHEN $table_posts.post_title LIKE '$esc_term%' THEN 2 
         ELSE 3 
     END";
 
-    // 3. Excerpt (SỬA LỖI CÚ PHÁP TẠI ĐÂY)
-    // Chúng ta tách chuỗi Regex ra khỏi chuỗi SQL chính để tránh xung đột ký tự
     $boundary_start = '[[:<:]]'; 
     $boundary_end = '[[:>:]]';
     
@@ -187,7 +168,6 @@ function glossary_orderby_filter_v6_3( $orderby, $query ) {
     END";
 
     $order_length = "CHAR_LENGTH($table_posts.post_title)";
-
     $custom_order = "$order_type ASC, $order_title ASC, $order_excerpt ASC, $order_length ASC";
 
     if ( empty( $orderby ) ) {
@@ -196,4 +176,4 @@ function glossary_orderby_filter_v6_3( $orderby, $query ) {
         return $custom_order . ', ' . $orderby;
     }
 }
-add_filter( 'posts_orderby', 'glossary_orderby_filter_v6_3', 10, 2 );
+add_filter( 'posts_orderby', 'glossary_orderby_filter_v6_4', 10, 2 );
